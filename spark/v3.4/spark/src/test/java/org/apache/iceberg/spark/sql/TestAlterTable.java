@@ -18,10 +18,21 @@
  */
 package org.apache.iceberg.spark.sql;
 
+import java.io.IOException;
+import java.util.List;
 import java.util.Map;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.Files;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.Table;
+import org.apache.iceberg.TestHelpers;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.data.FileHelpers;
+import org.apache.iceberg.data.GenericRecord;
+import org.apache.iceberg.data.Record;
 import org.apache.iceberg.hadoop.HadoopCatalog;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.spark.SparkCatalogTestBase;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.NestedField;
@@ -171,6 +182,41 @@ public class TestAlterTable extends SparkCatalogTestBase {
         "Schema should match expected",
         expectedSchema,
         validationCatalog.loadTable(tableIdent).schema().asStruct());
+  }
+
+  @Test
+  public void testEqualityDeletesAfterDropColumn() throws IOException {
+    TableIdentifier tableIdent = TableIdentifier.of(Namespace.of("default"), "test");
+    String tblName = catalogName + ".default.test";
+    sql(
+        "CREATE TABLE %s (id bigint NOT NULL, data string) USING iceberg TBLPROPERTIES ('format-version' = '2')",
+        tblName);
+
+    sql("insert into %s select 1,'a'", tblName);
+    sql("insert into %s select 2,'b'", tblName);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    Schema deleteRowSchema = table.schema().select("data");
+    Record dataDelete = GenericRecord.create(deleteRowSchema);
+    List<Record> dataDeletes = Lists.newArrayList(dataDelete.copy("data", "a"));
+    DeleteFile eqDeletes =
+        FileHelpers.writeDeleteFile(
+            table,
+            Files.localOutput(temp.newFile()),
+            TestHelpers.Row.of(0),
+            dataDeletes,
+            deleteRowSchema);
+
+    table.newRowDelta().addDeletes(eqDeletes).commit();
+
+    sql("ALTER TABLE %s DROP COLUMN data", tblName);
+
+    Assertions.assertThatThrownBy(() -> sql("select * from %s", tblName))
+        .isInstanceOf(SparkException.class)
+        .cause()
+        .isInstanceOf(NullPointerException.class);
+
+    sql("DROP TABLE %s", tblName);
   }
 
   @Test
